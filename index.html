@@ -1,0 +1,160 @@
+import streamlit as st
+import cv2
+import torch
+import tempfile
+import os
+import pandas as pd
+from utils.detect import detect_vehicles
+from utils.ocr import extract_plate_text
+
+st.set_page_config(page_title="AutoVision: Vehicle and License Plate AI", layout="wide")
+st.title("🚗 AutoVision: Vehicle and License Plate AI")
+
+uploaded_file = st.file_uploader("Upload a video file", type=["mp4", "avi", "mov"])
+use_webcam = st.checkbox("Use webcam")
+run_detection = st.button("Run Detection")
+
+output_data = []
+
+if run_detection:
+    if use_webcam:
+        cap = cv2.VideoCapture(0)
+    elif uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded_file.read())
+        cap = cv2.VideoCapture(tfile.name)
+    else:
+        st.error("Please upload a video or select webcam.")
+        st.stop()
+
+    stframe = st.empty()
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        processed_frame, detections = detect_vehicles(frame)
+
+        for det in detections:
+            plate_crop = det['crop']
+            text = extract_plate_text(plate_crop)
+            det['plate'] = text
+            output_data.append(det)
+
+        stframe.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB")
+
+    cap.release()
+
+    df = pd.DataFrame(output_data)
+    csv_path = os.path.join("output", "plates.csv")
+    df.to_csv(csv_path, index=False)
+    st.success("Detection completed!")
+    st.download_button("Download OCR Results", csv_path)
+
+# ========== utils/detect.py ==========
+
+import cv2
+import torch
+
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+model.classes = [2, 3, 5, 7]  # car, motorbike, bus, truck
+
+COLORS = {
+    2: (255, 0, 0),     # car - blue
+    3: (0, 255, 0),     # motorbike - green
+    5: (0, 0, 255),     # bus - red
+    7: (255, 255, 0)    # truck - cyan
+}
+
+
+def detect_vehicles(frame):
+    results = model(frame)
+    detections = []
+
+    for *box, conf, cls in results.xyxy[0]:
+        x1, y1, x2, y2 = map(int, box)
+        class_id = int(cls)
+        label = model.names[class_id]
+        color = COLORS.get(class_id, (255, 255, 255))
+
+        cropped = frame[y1:y2, x1:x2]
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        detections.append({
+            'label': label,
+            'confidence': float(conf),
+            'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+            'crop': cropped
+        })
+    return frame, detections
+
+# ========== utils/ocr.py ==========
+
+import pytesseract
+import cv2
+import numpy as np
+
+pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"  # Adjust for OS
+
+def extract_plate_text(plate_img):
+    gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    denoised = cv2.fastNlMeansDenoising(thresh, None, 30, 7, 21)
+    text = pytesseract.image_to_string(denoised, config='--psm 7')
+    return text.strip()
+
+# ========== requirements.txt ==========
+
+opencv-python
+streamlit
+torch
+torchvision
+tesseract
+pytesseract
+Pillow
+pandas
+ultralytics
+
+# ========== README.md ==========
+
+# AutoVision: Vehicle and License Plate AI
+
+AutoVision is a real-time vehicle detection and license plate recognition system built using Python, YOLOv5, and OCR.
+
+## Features
+- Real-time vehicle detection from webcam or video file
+- Class-wise bounding boxes: cars, trucks, bikes, buses
+- License plate OCR using Tesseract
+- Streamlit-based GUI
+- Downloadable CSV of plate numbers
+
+## Installation
+```bash
+git clone https://github.com/yourname/autovision.git
+cd autovision
+pip install -r requirements.txt
+```
+
+## Usage
+```bash
+streamlit run app.py
+```
+
+## Folder Structure
+```
+/models/     # YOLOv5 model weights
+/utils/      # detect.py and ocr.py
+/data/       # Uploaded video files
+/output/     # Processed frames and CSVs
+```
+
+## Notes
+- Works on CPU but faster with GPU (CUDA support)
+- Requires Tesseract installed separately
+
+---
+
+Would you like a GitHub-ready ZIP or auto-deploy button for this?
